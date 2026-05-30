@@ -112,6 +112,12 @@ class GSplatRenderer(nn.Module):
         def _per_item(coeffs: torch.Tensor | None, ib: int) -> torch.Tensor | None:
             return None if coeffs is None else coeffs[ib : ib + 1]
 
+        # The 3DGUT world-space kernel (with_eval3d=True) hard-asserts exactly 3 channels
+        # (gsplat Rasterization.cpp: `channels == 3`), so it cannot emit the extra depth channel.
+        # Render RGB only on that path; depth is not produced (it is unused by the training loss,
+        # which supervises the shared monodepth, not the per-branch rendered depth).
+        render_mode = "RGB" if with_eval3d else "RGB+D"
+
         for ib in range(batch_size):
             colors, alphas, meta = gsplat.rendering.rasterization(
                 means=gaussians.mean_vectors[ib],
@@ -123,7 +129,7 @@ class GSplatRenderer(nn.Module):
                 Ks=intrinsics[ib : ib + 1, :3, :3],
                 width=image_width,
                 height=image_height,
-                render_mode="RGB+D",
+                render_mode=render_mode,
                 rasterize_mode="classic",
                 absgrad=False,
                 packed=False,
@@ -137,8 +143,12 @@ class GSplatRenderer(nn.Module):
             )
 
             rendered_color = colors[..., 0:3].permute([0, 3, 1, 2])
-            rendered_depth_unnormalized = colors[..., 3:4].permute([0, 3, 1, 2])
             rendered_alpha = alphas.permute([0, 3, 1, 2])
+            if with_eval3d:
+                # eval3d renders RGB only -> no depth channel available.
+                rendered_depth_unnormalized = torch.zeros_like(rendered_color[:, 0:1])
+            else:
+                rendered_depth_unnormalized = colors[..., 3:4].permute([0, 3, 1, 2])
 
             # Compose with background color.
             rendered_color = self.compose_with_background(

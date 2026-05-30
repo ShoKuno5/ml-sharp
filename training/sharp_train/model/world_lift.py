@@ -102,29 +102,25 @@ def lift_to_world(
         )
 
 
-def _chunked_eigh(
-    matrices: torch.Tensor, chunk: int = 65536
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Batched symmetric eigendecomposition, computed in chunks over the leading dimension.
+_MAGMA_SELECTED = False
 
-    The CUDA backend (cuSOLVER ``syevjBatched``) returns ``CUSOLVER_STATUS_INVALID_VALUE`` on
-    very large batches (here ~1.18M 3x3 matrices). Splitting the batch keeps each call within the
-    backend's limits; results are identical to a single call and the op stays differentiable.
+
+def _ensure_magma_eigh_backend(device: torch.device) -> None:
+    """Prefer MAGMA for CUDA linalg (set once, idempotent).
+
+    A backend sweep on this torch 2.8+cu128 build showed cuSOLVER's batched symmetric solver
+    (``Xsyevbatched``) fails at the bufferSize query for batch >= ~65536 — independent of the
+    data, conditioning, or scale — while MAGMA (bundled in this build) succeeds for every batch,
+    including the full ~1.18M decomposition in a single call. eigh emits ~1.18M 3x3 matrices per
+    branch, so we route CUDA eigendecompositions through MAGMA.
     """
-    leading = matrices.shape[:-2]
-    flat = matrices.reshape(-1, 3, 3)
-    n = flat.shape[0]
-    if n <= chunk:
-        eigvals, eigvecs = torch.linalg.eigh(flat)
-    else:
-        eigval_parts, eigvec_parts = [], []
-        for start in range(0, n, chunk):
-            part_vals, part_vecs = torch.linalg.eigh(flat[start : start + chunk])
-            eigval_parts.append(part_vals)
-            eigvec_parts.append(part_vecs)
-        eigvals = torch.cat(eigval_parts, dim=0)
-        eigvecs = torch.cat(eigvec_parts, dim=0)
-    return eigvals.reshape(*leading, 3), eigvecs.reshape(*leading, 3, 3)
+    global _MAGMA_SELECTED
+    if device.type == "cuda" and not _MAGMA_SELECTED:
+        try:
+            torch.backends.cuda.preferred_linalg_library("magma")
+        except Exception:  # noqa: BLE001 - backend selection is best-effort
+            pass
+        _MAGMA_SELECTED = True
 
 
 def covars_to_quats_scales(
@@ -132,13 +128,12 @@ def covars_to_quats_scales(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Differentiably decompose symmetric 3x3 covariances into quaternions and scales.
 
-    Uses :func:`torch.linalg.eigh` (differentiable, runs on GPU) instead of the inference
-    code's detached CPU SVD, and is hardened for the GPU path: a small diagonal ``jitter`` is
-    added *before* the decomposition (the metric covariance has near-zero eigenvalues ~1e-9 that
-    sit below cuSOLVER's tolerance, and the floor also guarantees positive-definiteness), the
-    decomposition is chunked (cuSOLVER rejects the full ~1.18M batch), inputs are sanitized, and
-    the eigenvector basis is flipped to a proper rotation (det = +1) when ``eigh`` returns a
-    reflection.
+    Uses :func:`torch.linalg.eigh` (differentiable, runs on GPU) instead of the inference code's
+    detached CPU SVD. CUDA eigendecompositions are routed through MAGMA
+    (:func:`_ensure_magma_eigh_backend`) because cuSOLVER's batched solver rejects the large
+    (~1.18M) batch. A small diagonal ``jitter`` is added before the decomposition for strict
+    positive-definiteness / gradient stability, inputs are sanitized, and the eigenvector basis
+    is flipped to a proper rotation (det = +1) when ``eigh`` returns a reflection.
 
     Args:
         covars: Symmetric covariance matrices, shape [..., 3, 3].
@@ -151,15 +146,16 @@ def covars_to_quats_scales(
     # inside a bf16 training step.
     with torch.autocast(device_type=covars.device.type, enabled=False):
         covars = covars.float()
+        _ensure_magma_eigh_backend(covars.device)
         covars = torch.nan_to_num(covars, nan=0.0, posinf=0.0, neginf=0.0)
         # Symmetrize defensively (numerical asymmetry would make eigh complain).
         covars = 0.5 * (covars + covars.transpose(-1, -2))
-        # Diagonal floor BEFORE eigh (cuSOLVER stability + positive-definiteness).
+        # Diagonal floor BEFORE eigh (positive-definiteness + sqrt-grad stability).
         if jitter > 0:
             eye = torch.eye(3, device=covars.device, dtype=covars.dtype)
             covars = covars + jitter * eye
 
-        eigvals, eigvecs = _chunked_eigh(covars)  # eigvals ascending; eigvecs columns
+        eigvals, eigvecs = torch.linalg.eigh(covars)  # eigvals ascending; eigvecs columns
 
         # Flip to a proper rotation (det = +1) without an in-place op on the autograd graph.
         det = torch.linalg.det(eigvecs)  # [...]

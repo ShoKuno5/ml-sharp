@@ -19,7 +19,6 @@ from sharp.utils.gaussians import (
     get_unprojection_matrix,
 )
 from sharp_train.model.world_lift import (
-    _chunked_eigh,
     covars_to_quats_scales,
     lift_for_render,
     lift_to_world,
@@ -85,15 +84,6 @@ def test_means_lift_matches_unprojection() -> None:
     unproj = get_unprojection_matrix(torch.eye(4), _INTRINSICS, _IMAGE_SHAPE)
     expected = gaussians.mean_vectors @ unproj[:3, :3].transpose(-1, -2) + unproj[:3, 3]
     assert torch.allclose(world.means, expected, atol=1e-4, rtol=1e-3)
-
-
-def test_chunked_eigh_matches_single() -> None:
-    """_chunked_eigh (small chunk) reproduces a single eigh on a larger-than-chunk batch."""
-    gen = torch.Generator().manual_seed(11)
-    covars = _random_spd(20, gen)
-    vals_single = torch.linalg.eigvalsh(covars)
-    vals_chunked, _ = _chunked_eigh(covars, chunk=8)
-    assert torch.allclose(vals_single, vals_chunked, atol=1e-5)
 
 
 def test_decompose_degenerate_and_tiny() -> None:
