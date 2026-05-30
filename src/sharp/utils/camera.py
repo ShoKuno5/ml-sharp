@@ -21,12 +21,21 @@ LookAtMode = Literal["point", "ahead"]
 
 @dataclasses.dataclass
 class CameraInfo:
-    """Camera info for a pinhole camera."""
+    """Camera info for a (optionally distorted) camera.
+
+    The distortion fields default to ``None`` / ``"pinhole"`` so existing pinhole usage is
+    unchanged. When set, they are passed through to the gsplat renderer (which requires the
+    Unscented Transform path for any non-pinhole / distorted camera).
+    """
 
     intrinsics: torch.Tensor
     extrinsics: torch.Tensor
     width: int
     height: int
+    camera_model: str = "pinhole"
+    radial_coeffs: torch.Tensor | None = None
+    tangential_coeffs: torch.Tensor | None = None
+    ftheta_coeffs: object | None = None
 
 
 class FocusRange(NamedTuple):
