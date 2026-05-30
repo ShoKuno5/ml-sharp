@@ -256,10 +256,59 @@ def load_dslr_scene(
 
 
 def read_scene_ids(root: Path, split: str) -> list[str]:
-    """Read the scene-disjoint split list (``splits/nvs_sem_{train,val}.txt``)."""
+    """Read a raw scene-disjoint split list (``splits/nvs_sem_{train,val}.txt``).
+
+    Returns an empty list if the split file is absent (some mirrors ship only a subset).
+    """
     fname = {"train": "nvs_sem_train.txt", "val": "nvs_sem_val.txt"}.get(split, f"nvs_{split}.txt")
     path = root / "splits" / fname
+    if not path.exists():
+        return []
     return [line.strip() for line in path.read_text().splitlines() if line.strip()]
+
+
+def _scene_present(root: Path, scene_id: str) -> bool:
+    """True if the scene's DSLR transforms exist on disk (this copy may be a partial mirror)."""
+    return (root / "data" / scene_id / "dslr" / "nerfstudio" / "transforms.json").exists()
+
+
+def resolve_scene_split(
+    root: Path, split: str, val_fraction: float = 0.1, seed: int = 0
+) -> list[str]:
+    """Resolve the scene IDs for ``split``, robust to partial mirrors.
+
+    Prefers the official ``nvs_sem_{train,val}.txt`` lists (intersected with scenes present on
+    disk). When the official validation set has no scenes present (this ScanNet++ copy lists 50
+    val scenes but mirrors only train rooms), a deterministic scene-disjoint validation set is
+    carved out of the present training scenes (seeded shuffle, ``val_fraction`` held out), so train
+    and val never share a room.
+
+    Args:
+        root: ScanNet++ root containing ``splits/`` and ``data/``.
+        split: ``"train"`` or ``"val"``.
+        val_fraction: Fraction of present train scenes to reserve for val when carving.
+        seed: Seed for the deterministic carve.
+
+    Returns:
+        Sorted scene IDs for the requested split.
+    """
+    train_present = sorted(s for s in read_scene_ids(root, "train") if _scene_present(root, s))
+    val_present = sorted(s for s in read_scene_ids(root, "val") if _scene_present(root, s))
+
+    if val_present:  # full mirror: use the official split as-is
+        return val_present if split == "val" else train_present
+
+    # Partial mirror: carve a deterministic, scene-disjoint val out of the present train scenes.
+    pool = train_present or sorted(
+        p.name for p in (root / "data").iterdir() if _scene_present(root, p.name)
+    )
+    shuffled = list(pool)
+    random.Random(seed).shuffle(shuffled)
+    num_val = int(len(pool) * val_fraction)
+    val_ids = set(shuffled[:num_val])
+    if split == "val":
+        return sorted(val_ids)
+    return [s for s in pool if s not in val_ids]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -322,6 +371,8 @@ class ScanNetppConfig:
     baseline_range: tuple[float, float] = (0.05, 0.5)
     max_angle_deg: float = 60.0
     max_scenes: int | None = None
+    # Fraction of present train scenes reserved for val when the official val set is not mirrored.
+    val_fraction: float = 0.1
     seed: int = 0
 
 
@@ -333,7 +384,9 @@ class ScanNetppDslrDataset(torch.utils.data.Dataset):
         self.config = config
         self.root = Path(config.root)
         rng = random.Random(config.seed)
-        scene_ids = read_scene_ids(self.root, config.split)
+        scene_ids = resolve_scene_split(
+            self.root, config.split, config.val_fraction, config.seed
+        )
         if config.max_scenes is not None:
             scene_ids = scene_ids[: config.max_scenes]
 

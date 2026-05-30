@@ -21,7 +21,46 @@ from sharp_train.data.scannetpp import (
     fisheye_unproject,
     intrinsics_4x4,
     relative_viewmat,
+    resolve_scene_split,
 )
+
+
+def _touch_scene(root: Path, scene_id: str) -> None:
+    """Create a present-on-disk marker (dslr/nerfstudio/transforms.json) for a scene."""
+    path = root / "data" / scene_id / "dslr" / "nerfstudio"
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "transforms.json").write_text("{}")
+
+
+def test_resolve_split_partial_mirror(tmp_path) -> None:
+    """When val is not mirrored, carve a deterministic scene-disjoint val from present scenes."""
+    ids = [f"s{i:02d}" for i in range(10)]
+    (tmp_path / "splits").mkdir(parents=True)
+    (tmp_path / "splits" / "nvs_sem_train.txt").write_text("\n".join(ids))
+    present = ids[:8]  # partial mirror: 2 listed scenes absent, no val file
+    for scene_id in present:
+        _touch_scene(tmp_path, scene_id)
+
+    train = resolve_scene_split(tmp_path, "train", val_fraction=0.25, seed=0)
+    val = resolve_scene_split(tmp_path, "val", val_fraction=0.25, seed=0)
+    assert set(train).isdisjoint(val)  # scene-disjoint
+    assert set(train) | set(val) == set(present)  # only present scenes, full coverage
+    assert len(val) == 2  # int(8 * 0.25)
+    assert val == resolve_scene_split(tmp_path, "val", val_fraction=0.25, seed=0)  # deterministic
+
+
+def test_resolve_split_full_mirror(tmp_path) -> None:
+    """When the official val scenes are present, use the official split verbatim."""
+    (tmp_path / "splits").mkdir(parents=True)
+    train_ids = [f"t{i}" for i in range(4)]
+    val_ids = ["v0", "v1"]
+    (tmp_path / "splits" / "nvs_sem_train.txt").write_text("\n".join(train_ids))
+    (tmp_path / "splits" / "nvs_sem_val.txt").write_text("\n".join(val_ids))
+    for scene_id in train_ids + val_ids:
+        _touch_scene(tmp_path, scene_id)
+
+    assert sorted(resolve_scene_split(tmp_path, "val")) == sorted(val_ids)
+    assert sorted(resolve_scene_split(tmp_path, "train")) == sorted(train_ids)
 
 
 def _c2w(position, dtype=torch.float32) -> torch.Tensor:

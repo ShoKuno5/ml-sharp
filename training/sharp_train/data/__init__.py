@@ -7,6 +7,7 @@ from .scannetpp import (
     c2w_opengl_to_viewmat,
     load_dslr_scene,
     relative_viewmat,
+    resolve_scene_split,
 )
 from .synthetic_dummy import DummyDataset, make_dummy_sample
 
@@ -19,4 +20,5 @@ __all__ = [
     "load_dslr_scene",
     "c2w_opengl_to_viewmat",
     "relative_viewmat",
+    "resolve_scene_split",
 ]
