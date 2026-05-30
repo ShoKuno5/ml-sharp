@@ -76,6 +76,12 @@ class GSplatRenderer(nn.Module):
         intrinsics: torch.Tensor,
         image_width: int,
         image_height: int,
+        camera_model: str = "pinhole",
+        radial_coeffs: torch.Tensor | None = None,
+        tangential_coeffs: torch.Tensor | None = None,
+        ftheta_coeffs=None,
+        with_ut: bool = False,
+        with_eval3d: bool = False,
     ) -> RenderingOutputs:
         """Predict images from gaussians.
 
@@ -85,9 +91,32 @@ class GSplatRenderer(nn.Module):
             intrinsics: The intriniscs of the camera to render to in OpenCV format.
             image_width: The desired output image width.
             image_height: The desired output image height.
+            camera_model: gsplat camera model, one of {"pinhole", "ortho", "fisheye",
+                "ftheta"}. Defaults to "pinhole" (the original behavior).
+            radial_coeffs: Per-camera OpenCV radial distortion coefficients, shape
+                [B, 6] (pinhole) or [B, 4] (fisheye). Requires ``with_ut=True``.
+            tangential_coeffs: Per-camera OpenCV tangential coefficients, shape [B, 2].
+            ftheta_coeffs: F-Theta camera distortion parameters (shared across cameras).
+            with_ut: Use the Unscented Transform projection (3DGUT). Required for any
+                distortion / non-pinhole camera model.
+            with_eval3d: Evaluate the Gaussian response in 3D world space (3DGUT).
+
+        Note:
+            Distortion (``radial_coeffs``/``tangential_coeffs``/``ftheta_coeffs``) and any
+            non-pinhole ``camera_model`` require ``with_ut=True``. The default arguments
+            reproduce the original classic-pinhole rendering exactly.
         """
         batch_size = len(gaussians.mean_vectors)
         outputs_list: list[RenderingOutputs] = []
+
+        def _per_item(coeffs: torch.Tensor | None, ib: int) -> torch.Tensor | None:
+            return None if coeffs is None else coeffs[ib : ib + 1]
+
+        # The 3DGUT world-space kernel (with_eval3d=True) hard-asserts exactly 3 channels
+        # (gsplat Rasterization.cpp: `channels == 3`), so it cannot emit the extra depth channel.
+        # Render RGB only on that path; depth is not produced (it is unused by the training loss,
+        # which supervises the shared monodepth, not the per-branch rendered depth).
+        render_mode = "RGB" if with_eval3d else "RGB+D"
 
         for ib in range(batch_size):
             colors, alphas, meta = gsplat.rendering.rasterization(
@@ -100,16 +129,26 @@ class GSplatRenderer(nn.Module):
                 Ks=intrinsics[ib : ib + 1, :3, :3],
                 width=image_width,
                 height=image_height,
-                render_mode="RGB+D",
+                render_mode=render_mode,
                 rasterize_mode="classic",
                 absgrad=False,
                 packed=False,
                 eps2d=self.low_pass_filter_eps,
+                camera_model=camera_model,
+                radial_coeffs=_per_item(radial_coeffs, ib),
+                tangential_coeffs=_per_item(tangential_coeffs, ib),
+                ftheta_coeffs=ftheta_coeffs,
+                with_ut=with_ut,
+                with_eval3d=with_eval3d,
             )
 
             rendered_color = colors[..., 0:3].permute([0, 3, 1, 2])
-            rendered_depth_unnormalized = colors[..., 3:4].permute([0, 3, 1, 2])
             rendered_alpha = alphas.permute([0, 3, 1, 2])
+            if with_eval3d:
+                # eval3d renders RGB only -> no depth channel available.
+                rendered_depth_unnormalized = torch.zeros_like(rendered_color[:, 0:1])
+            else:
+                rendered_depth_unnormalized = colors[..., 3:4].permute([0, 3, 1, 2])
 
             # Compose with background color.
             rendered_color = self.compose_with_background(
@@ -124,13 +163,15 @@ class GSplatRenderer(nn.Module):
             else:
                 ValueError("Unsupported ColorSpace type.")
 
-            # splats: (B, N, 10)
-            cov2d = self._conics_to_covars2d(meta["conics"])
-            # Set the cov2d of invisible splats to 1 to avoid nan in condition number calculation..
-            splats_visible_mask = meta["depths"] > 1e-2
-            cov2d[~splats_visible_mask][..., 0, 0] = 1
-            cov2d[~splats_visible_mask][..., 1, 1] = 1
-            cov2d[~splats_visible_mask][..., 0, 1] = 0
+            # splats: (B, N, 10). The UT (3DGUT) projection path does not return 2D
+            # conics in meta, so only compute this (unused) cov2d under the classic path.
+            if "conics" in meta:
+                cov2d = self._conics_to_covars2d(meta["conics"])
+                # Set the cov2d of invisible splats to 1 to avoid nan in condition number.
+                splats_visible_mask = meta["depths"] > 1e-2
+                cov2d[~splats_visible_mask][..., 0, 0] = 1
+                cov2d[~splats_visible_mask][..., 1, 1] = 1
+                cov2d[~splats_visible_mask][..., 0, 1] = 0
 
             # Normalize the depth by alpha.
             rendered_depth = rendered_depth_unnormalized / torch.clip(rendered_alpha, min=1e-8)

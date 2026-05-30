@@ -1,0 +1,15 @@
+# Extra dependencies for the training harness (install into the env on top of the inference deps).
+# lpips, tensorboard, pyyaml, opencv (cv2) are already present in the project env.
+#   pip install -r training/requirements-train.txt
+#
+# gsplat CUDA backend: the pinned gsplat==1.5.3 has no prebuilt wheel for py3.13 (the
+# docs.gsplat.studio/whl/pt28cu128 index has none), so its CUDA extension is JIT-compiled on the
+# first render. `ninja` is in the env but the pyenv shims shadow it (and nvcc), so the GPU job
+# must put the env bin + /usr/local/cuda/bin ahead of PATH and cache the build off ayu home —
+# see training/sharp_train/slurm/train_iruka2.sbatch (PATH / CUDA_HOME / TORCH_EXTENSIONS_DIR).
+webdataset            # WebDataset shard IO for the ScanNet++ / raycast datasets
+DISTS-pytorch         # DISTS perceptual loss
+lpips                 # LPIPS perceptual loss (already installed)
+open3d                # mesh ray-casting for the ScanNet-v2 dev/fallback dataset (Step 3c)
+tensorboard           # training logs (already installed)
+pyyaml                # config IO (already installed)
