@@ -51,9 +51,12 @@ export TMPDIR=/tmp
 echo "host: $(hostname)  gpus: ${CUDA_VISIBLE_DEVICES:-unset}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
-# --- Overfit sanity (single GPU): the Step 1b acceptance ---
-srun "${ENV_PY}" -m sharp_train.scripts.overfit --steps 300 --render-size 256 --stage A
+# --- Step 4 photometric-only pilot on real ScanNet++ DSLR pairs (multi-GPU) ---
+# Set --gres=gpu:N above to match; effective batch = #GPUs (batch=1/GPU). ~13 s/step.
+NPROC="${SLURM_GPUS_ON_NODE:-1}"
+echo "launching pilot on ${NPROC} GPU(s)"
+srun torchrun --nproc_per_node="${NPROC}" -m sharp_train.scripts.train \
+    --config "${REPO}/training/sharp_train/config/pilot.yaml"
 
-# --- Pilot training (multi-GPU, Step 4) — switch to this once the dataset exists ---
-# srun torchrun --nproc_per_node=4 -m sharp_train.scripts.train \
-#     --config "${REPO}/training/sharp_train/config/pilot.yaml"
+# --- Overfit sanity (single GPU): the Step 1b acceptance (alternative) ---
+# srun "${ENV_PY}" -m sharp_train.scripts.overfit --steps 300 --render-size 256 --stage A
