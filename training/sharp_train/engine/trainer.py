@@ -71,11 +71,18 @@ def train_step(
     world_p = lift_for_render(dual.pinhole, intrinsics, internal_shape, need_quats_scales=True)
     world_d = lift_for_render(dual.distorted, intrinsics, internal_shape, need_quats_scales=True)
 
+    # Branch P renders with its own pinhole intrinsics (distinct from the distorted-branch K on
+    # real fisheye data); falls back to the shared target_intrinsics when not provided (xi=0).
+    pinhole_intrinsics = (
+        batch.target_intrinsics_pinhole
+        if batch.target_intrinsics_pinhole is not None
+        else batch.target_intrinsics
+    )
     render_p = render_branch(
         renderer,
         world_p,
         batch.target_viewmat,
-        batch.target_intrinsics,
+        pinhole_intrinsics,
         batch.render_width,
         batch.render_height,
         camera_model="pinhole",
