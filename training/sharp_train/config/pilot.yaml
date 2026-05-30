@@ -46,4 +46,7 @@ loss:
 out_dir: /data/uni0/users/kuno/3dfm_distortion/results/train_pilot
 log_every: 20
 ckpt_every: 500
+ema_decay: 0.98          # smoothed train loss (batch=1 spot loss is noisy)
+val_every: 200           # periodic L1 on the scene-disjoint held-out val split
+val_samples: 8
 seed: 0

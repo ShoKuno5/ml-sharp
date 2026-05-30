@@ -12,7 +12,9 @@ the model is wrapped in DDP for the forward.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
+import statistics
 
 import torch
 import torch.distributed as dist
@@ -22,7 +24,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from sharp_train.config import TrainConfig, load_config
 from sharp_train.data import DummyDataset
 from sharp_train.data.scannetpp import ScanNetppConfig, ScanNetppDslrDataset
-from sharp_train.engine import build_model, build_renderer, fit
+from sharp_train.engine import build_model, build_renderer, fit, train_step
 from sharp_train.engine.trainer import save_checkpoint
 from sharp_train.losses import SymmetricLoss
 from sharp_train.optim import build_param_groups
@@ -60,6 +62,44 @@ def build_dataset(config: TrainConfig) -> torch.utils.data.Dataset:
             seed=config.seed,
         )
     )
+
+
+@torch.no_grad()
+def run_validation(
+    model: torch.nn.Module,
+    renderer,
+    loss_fn: SymmetricLoss,
+    dataset: torch.utils.data.Dataset,
+    num_samples: int,
+    internal_resolution: int,
+    device: torch.device,
+    bf16: bool,
+) -> dict[str, float]:
+    """Mean photometric loss over a fixed held-out val subset (rank-0 only; unwrapped model).
+
+    Uses the unwrapped model (no DDP collective) under no_grad, so it is safe to call on rank 0
+    alone — other ranks simply wait at the next training all-reduce.
+    """
+    autocast = (
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        if bf16 and device.type == "cuda"
+        else contextlib.nullcontext()
+    )
+    totals, pps, dds = [], [], []
+    for i in range(min(num_samples, len(dataset))):
+        batch = dataset[i].to(device)
+        with autocast:
+            total, terms = train_step(model, renderer, loss_fn, batch, internal_resolution)
+        totals.append(float(total))
+        pps.append(float(terms.get("D_pp", 0.0)))
+        dds.append(float(terms.get("D_dd", 0.0)))
+    if not totals:
+        return {}
+    return {
+        "val_total": statistics.mean(totals),
+        "val_D_pp": statistics.mean(pps),
+        "val_D_dd": statistics.mean(dds),
+    }
 
 
 def cycle_batches(loader: DataLoader, sampler: DistributedSampler | None):
@@ -121,6 +161,23 @@ def main() -> None:
     renderer = build_renderer()
     loss_fn = SymmetricLoss(config.loss).to(device)
 
+    # Held-out val set for a convergence read (rank 0 only; scene-disjoint from train).
+    val_dataset = None
+    if rank == 0 and config.val_every > 0 and not config.dummy_data:
+        val_dataset = ScanNetppDslrDataset(
+            ScanNetppConfig(
+                root=config.data_root,
+                split="val",
+                internal_resolution=config.internal_resolution,
+                render_size=config.render_size,
+                distorted_input_fraction=config.distorted_input_fraction,
+                pairs_per_scene=max(1, config.val_samples),
+                val_fraction=config.val_fraction,
+                max_scenes=config.max_scenes,
+                seed=config.seed,
+            )
+        )
+
     writer = None
     if rank == 0:
         try:
@@ -132,20 +189,37 @@ def main() -> None:
             writer = None
         print(
             f"[train] ddp={is_ddp} world={world} dataset_size={len(dataset)} "
+            f"val_size={0 if val_dataset is None else len(val_dataset)} "
             f"stage={config.stage} max_steps={config.max_steps} dummy={config.dummy_data}",
             flush=True,
         )
 
+    ema = None
     batches = cycle_batches(loader, sampler)
     for step, terms in fit(train_model, renderer, loss_fn, batches, config, device, optimizer):
         global_step = start_step + step
+        total_loss = terms["total"]
+        decay = config.ema_decay
+        ema = total_loss if ema is None else decay * ema + (1 - decay) * total_loss
         if rank == 0 and step % config.log_every == 0:
             shown = {k: terms[k] for k in ("total", "D_pp", "D_dd", "depth") if k in terms}
             msg = "  ".join(f"{k}={v:.4f}" for k, v in shown.items())
-            print(f"step {global_step:6d}  {msg}", flush=True)
+            print(f"step {global_step:6d}  {msg}  ema_total={ema:.4f}", flush=True)
             if writer is not None:
                 for key, value in terms.items():
                     writer.add_scalar(f"loss/{key}", value, global_step)
+                writer.add_scalar("loss/ema_total", ema, global_step)
+        if rank == 0 and val_dataset is not None and step % config.val_every == 0:
+            val = run_validation(
+                model, renderer, loss_fn, val_dataset, config.val_samples,
+                config.internal_resolution, device, config.bf16,
+            )
+            if val:
+                vmsg = "  ".join(f"{k}={v:.4f}" for k, v in val.items())
+                print(f"step {global_step:6d}  [val] {vmsg}", flush=True)
+                if writer is not None:
+                    for key, value in val.items():
+                        writer.add_scalar(f"val/{key}", value, global_step)
         if rank == 0 and config.ckpt_every > 0 and step % config.ckpt_every == 0:
             save_checkpoint(model, optimizer, global_step, config.out_dir)
 

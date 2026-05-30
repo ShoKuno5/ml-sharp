@@ -61,6 +61,11 @@ class TrainConfig:
     out_dir: str = "/data/uni0/users/kuno/3dfm_distortion/results/train"
     log_every: int = 10
     ckpt_every: int = 500
+    # Convergence read: EMA of the (noisy, batch=1) train loss + periodic L1 on the held-out val
+    # split (scene-disjoint). val_every=0 disables val.
+    ema_decay: float = 0.98
+    val_every: int = 0
+    val_samples: int = 8
     seed: int = 0
 
 

@@ -9,9 +9,9 @@
 #
 #SBATCH --job-name=sharp-distort
 #SBATCH --output=/data/uni0/users/kuno/3dfm_distortion/results/slurm-%j.out
-#SBATCH --gres=gpu:1                 # overfit: 1 GPU; pilot/full: 4-8
-#SBATCH --cpus-per-task=8
-#SBATCH --time=02:00:00
+#SBATCH --gres=gpu:4                 # pilot: >=4 GPUs (effective batch = #GPUs at batch=1/GPU)
+#SBATCH --cpus-per-task=16
+#SBATCH --time=12:00:00
 ## #SBATCH --partition=<FILL_ME>
 ## #SBATCH --account=<FILL_ME>
 
@@ -40,7 +40,11 @@ fi
 echo "using CUDA toolkit: ${CUDA_DIR}"
 export PATH="${ENV}/bin:${CUDA_DIR}/bin:${PATH}"
 export CUDA_HOME="${CUDA_DIR}"
-export TORCH_EXTENSIONS_DIR=/data/uni0/users/kuno/3dfm_distortion/cache/torch_extensions
+# Dedicated extension cache for THIS project: a shared dir can hold a stale gsplat build compiled
+# against an old CUDA (e.g. 11.0 headers -> "gcc later than 9 not supported"), which the JIT reuses
+# even with cuda-12.8 selected. Keep it project-local.
+export TORCH_EXTENSIONS_DIR=/data/uni0/users/kuno/unified_camera_NVS/cache/torch_extensions
+mkdir -p "${TORCH_EXTENSIONS_DIR}"
 
 export PYTHONPATH="${REPO}/src:${REPO}/training"
 export HF_HOME=/data/uni0/users/kuno/3dfm_distortion/cache/huggingface
@@ -51,12 +55,18 @@ export TMPDIR=/tmp
 echo "host: $(hostname)  gpus: ${CUDA_VISIBLE_DEVICES:-unset}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
-# --- Step 4 photometric-only pilot on real ScanNet++ DSLR pairs (multi-GPU) ---
-# Set --gres=gpu:N above to match; effective batch = #GPUs (batch=1/GPU). ~13 s/step.
+# --- Step 4 photometric-only pilot on real ScanNet++ DSLR pairs ---
+# Launch directly (no `srun`): srun step-launch is flaky on this cluster
+# ("StepId aborted before step completely launched"). Single-node only.
+# Effective batch = #GPUs (batch=1/GPU); use >=4 GPUs for a readable convergence signal. ~13 s/step.
 NPROC="${SLURM_GPUS_ON_NODE:-1}"
+CONFIG="${REPO}/training/sharp_train/config/pilot.yaml"
 echo "launching pilot on ${NPROC} GPU(s)"
-srun torchrun --nproc_per_node="${NPROC}" -m sharp_train.scripts.train \
-    --config "${REPO}/training/sharp_train/config/pilot.yaml"
+if [ "${NPROC}" -gt 1 ]; then
+  torchrun --standalone --nproc_per_node="${NPROC}" -m sharp_train.scripts.train --config "${CONFIG}"
+else
+  "${ENV_PY}" -m sharp_train.scripts.train --config "${CONFIG}"  # single-process fallback
+fi
 
 # --- Overfit sanity (single GPU): the Step 1b acceptance (alternative) ---
-# srun "${ENV_PY}" -m sharp_train.scripts.overfit --steps 300 --render-size 256 --stage A
+# "${ENV_PY}" -m sharp_train.scripts.overfit --steps 300 --render-size 256 --stage A
