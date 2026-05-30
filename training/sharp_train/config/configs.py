@@ -33,6 +33,17 @@ class TrainConfig:
     render_size: int = 512
     focal_ratio: float = 1.0
     dummy_data: bool = True
+    # ScanNet++ DSLR dataset (used when dummy_data is False).
+    data_root: str = "/data/umiushi0/datasets/VGGT/ScanNet++"
+    scannetpp_split: str = "train"
+    pairs_per_scene: int = 50
+    distorted_input_fraction: float = 0.7
+    val_fraction: float = 0.1
+    max_scenes: int | None = None
+    num_workers: int = 4
+    # DDP: set True if the staged graph leaves some trainable params without grad on a step.
+    find_unused_parameters: bool = False
+    resume: str = ""
 
     # Optimization.
     lr_decoder: float = 2.0e-4
@@ -50,6 +61,11 @@ class TrainConfig:
     out_dir: str = "/data/uni0/users/kuno/3dfm_distortion/results/train"
     log_every: int = 10
     ckpt_every: int = 500
+    # Convergence read: EMA of the (noisy, batch=1) train loss + periodic L1 on the held-out val
+    # split (scene-disjoint). val_every=0 disables val.
+    ema_decay: float = 0.98
+    val_every: int = 0
+    val_samples: int = 8
     seed: int = 0
 
 

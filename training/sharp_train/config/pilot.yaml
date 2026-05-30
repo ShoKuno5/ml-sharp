@@ -1,7 +1,8 @@
-# Pilot config: dual-branch SHARP, Stage A, modest render resolution.
-# Internal resolution is fixed at 1536 by the patch encoder; memory is managed via render
-# size, grad checkpointing, bf16, and the frozen patch encoder. Real data is wired in Step 3
-# (set dummy_data: false and point the dataset at the ScanNet++ pairs).
+# Step 4 photometric-only pilot: dual-branch SHARP on real ScanNet++ DSLR fisheye pairs.
+# First question: does the dual-branch learn distorted NVS on real pairs? Photometric L1 only
+# (lambda_depth=0; LPIPS/DISTS off for the first run to avoid backbone-download dependence on the
+# compute node -- enable beta/gamma once the perceptual backbones are cached under TORCH_HOME).
+# Internal resolution is fixed at 1536 (patch encoder); memory via render size + grad ckpt + bf16.
 checkpoint_path: /data/uni0/users/kuno/3dfm_distortion/cache/torch/hub/checkpoints/sharp_2572gikvuh.pt
 stage: A
 ray_map_channels: 0
@@ -9,29 +10,43 @@ single_conditional_decoder: false
 internal_resolution: 1536
 grad_checkpointing: true
 
-render_size: 512
-focal_ratio: 1.0
+# Data.
 dummy_data: false
+data_root: /data/umiushi0/datasets/VGGT/ScanNet++
+scannetpp_split: train
+render_size: 512
+pairs_per_scene: 40
+distorted_input_fraction: 0.7   # 30% xi=0 (undistorted-input) for anti-forgetting
+val_fraction: 0.1
+max_scenes: null
+num_workers: 4
 
+# Optimization (~13 s/step; budget accordingly). batch=1/GPU; effective batch = #GPUs.
 lr_decoder: 2.0e-4
 lr_trunk: 2.0e-5
 weight_decay: 0.0
-grad_accum: 4
-max_steps: 20000
+grad_accum: 1
+max_steps: 2000
 bf16: true
 grad_clip: 1.0
+find_unused_parameters: false
+resume: ""
 
+# Loss: photometric L1 only for the first pilot.
 loss:
   alpha_l1: 1.0
-  beta_lpips: 1.0
-  gamma_dists: 1.0
+  beta_lpips: 0.0
+  gamma_dists: 0.0
   w_pp: 1.0
   w_dd: 1.0
   w_pd: 0.0
   w_dp: 0.0
-  lambda_depth: 0.05
+  lambda_depth: 0.0
 
 out_dir: /data/uni0/users/kuno/3dfm_distortion/results/train_pilot
 log_every: 20
-ckpt_every: 1000
+ckpt_every: 500
+ema_decay: 0.98          # smoothed train loss (batch=1 spot loss is noisy)
+val_every: 200           # periodic L1 on the scene-disjoint held-out val split
+val_samples: 8
 seed: 0
