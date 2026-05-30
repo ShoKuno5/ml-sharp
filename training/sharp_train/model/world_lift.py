@@ -66,31 +66,40 @@ def lift_to_world(
         World-frame means + covariance (and colors/opacities passed through).
     """
     device = gaussians.mean_vectors.device
-    dtype = gaussians.mean_vectors.dtype
 
-    if intrinsics.shape[-1] == 3:
-        intrinsics_4x4 = torch.eye(4, device=device, dtype=dtype)
-        intrinsics_4x4[:3, :3] = intrinsics
-        intrinsics = intrinsics_4x4
+    # The lift's linear algebra (``torch.linalg.inv`` here, ``eigh`` in the decomposition) does
+    # not support low-precision dtypes, so under a bf16 autocast training step we must run it in
+    # fp32. The lift is cheap relative to the encoder/decoder, so we keep the whole thing fp32
+    # (autocast disabled); the bf16 memory savings live upstream in the heavy network.
+    with torch.autocast(device_type=device.type, enabled=False):
+        means = gaussians.mean_vectors.float()
+        quaternions = gaussians.quaternions.float()
+        scales = gaussians.singular_values.float()
 
-    extrinsics = torch.eye(4, device=device, dtype=dtype)
-    unprojection = get_unprojection_matrix(extrinsics, intrinsics.to(dtype), image_shape)
-    linear = unprojection[:3, :3].to(dtype)  # [3, 3]
-    offset = unprojection[:3, 3].to(dtype)  # [3]
+        intrinsics = intrinsics.float()
+        if intrinsics.shape[-1] == 3:
+            intrinsics_4x4 = torch.eye(4, device=device, dtype=torch.float32)
+            intrinsics_4x4[:3, :3] = intrinsics
+            intrinsics = intrinsics_4x4
 
-    # means_world = means @ linear^T + offset   (differentiable in means).
-    means_world = gaussians.mean_vectors @ linear.transpose(-1, -2) + offset
+        extrinsics = torch.eye(4, device=device, dtype=torch.float32)
+        unprojection = get_unprojection_matrix(extrinsics, intrinsics, image_shape)
+        linear = unprojection[..., :3, :3]  # [3, 3]
+        offset = unprojection[..., :3, 3]  # [3]
 
-    # Sigma_world = linear @ Sigma_ndc @ linear^T   (differentiable).
-    covars_ndc = compose_covariance_matrices(gaussians.quaternions, gaussians.singular_values)
-    covars_world = linear @ covars_ndc @ linear.transpose(-1, -2)
+        # means_world = means @ linear^T + offset   (differentiable in means).
+        means_world = means @ linear.transpose(-1, -2) + offset
 
-    return WorldGaussians(
-        means=means_world,
-        covars=covars_world,
-        colors=gaussians.colors,
-        opacities=gaussians.opacities,
-    )
+        # Sigma_world = linear @ Sigma_ndc @ linear^T   (differentiable).
+        covars_ndc = compose_covariance_matrices(quaternions, scales)
+        covars_world = linear @ covars_ndc @ linear.transpose(-1, -2)
+
+        return WorldGaussians(
+            means=means_world,
+            covars=covars_world,
+            colors=gaussians.colors.float(),
+            opacities=gaussians.opacities.float(),
+        )
 
 
 def covars_to_quats_scales(
@@ -110,19 +119,23 @@ def covars_to_quats_scales(
     Returns:
         ``(quaternions [..., 4], scales [..., 3])``.
     """
-    # Symmetrize defensively (numerical asymmetry would make eigh complain).
-    covars = 0.5 * (covars + covars.transpose(-1, -2))
-    eigvals, eigvecs = torch.linalg.eigh(covars)  # eigvals ascending; eigvecs columns
+    # eigh / det reject low-precision dtypes; force fp32 (autocast disabled) so this is safe
+    # inside a bf16 training step.
+    with torch.autocast(device_type=covars.device.type, enabled=False):
+        covars = covars.float()
+        # Symmetrize defensively (numerical asymmetry would make eigh complain).
+        covars = 0.5 * (covars + covars.transpose(-1, -2))
+        eigvals, eigvecs = torch.linalg.eigh(covars)  # eigvals ascending; eigvecs columns
 
-    # Flip to a proper rotation (det = +1) without an in-place op on the autograd graph.
-    det = torch.linalg.det(eigvecs)  # [...]
-    flip = torch.ones_like(eigvecs)
-    flip[..., :, 2] = torch.sign(det).unsqueeze(-1)
-    rotations = eigvecs * flip
+        # Flip to a proper rotation (det = +1) without an in-place op on the autograd graph.
+        det = torch.linalg.det(eigvecs)  # [...]
+        flip = torch.ones_like(eigvecs)
+        flip[..., :, 2] = torch.sign(det).unsqueeze(-1)
+        rotations = eigvecs * flip
 
-    scales = torch.sqrt(eigvals.clamp(min=0.0) + jitter)
-    quaternions = linalg.quaternions_from_rotation_matrices(rotations)
-    return quaternions, scales
+        scales = torch.sqrt(eigvals.clamp(min=0.0) + jitter)
+        quaternions = linalg.quaternions_from_rotation_matrices(rotations)
+        return quaternions, scales
 
 
 def lift_for_render(

@@ -82,6 +82,26 @@ def test_means_lift_matches_unprojection() -> None:
     assert torch.allclose(world.means, expected, atol=1e-4, rtol=1e-3)
 
 
+def test_lift_under_bf16_autocast() -> None:
+    """The lift runs under a bf16 autocast step (linalg.inv / eigh pinned to fp32).
+
+    Reproduces the iruka2 overfit crash (``linalg.inv: Low precision dtypes not supported``) on
+    CPU: without the fp32 pinning, the autocast-bf16 matmul into inv/eigh would raise.
+    """
+    gen = torch.Generator().manual_seed(7)
+    gaussians = _gaussians(16, gen)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        world = lift_for_render(gaussians, _INTRINSICS, _IMAGE_SHAPE, need_quats_scales=True)
+    for name, tensor in (
+        ("means", world.means),
+        ("covars", world.covars),
+        ("quats", world.quats),
+        ("scales", world.scales),
+    ):
+        assert tensor.dtype == torch.float32, f"{name} not fp32: {tensor.dtype}"
+        assert torch.isfinite(tensor).all(), f"{name} non-finite under bf16 autocast"
+
+
 def test_lift_gradients_flow() -> None:
     """Gradients flow through the lift to means, quaternions and scales (no NaN, nonzero)."""
     gen = torch.Generator().manual_seed(2)

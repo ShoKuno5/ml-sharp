@@ -18,11 +18,20 @@
 set -euo pipefail
 
 REPO=/home/mil/kuno/models/ml-sharp
-ENV_PY=/data/uni0/users/kuno/envs/sharp/bin/python
+ENV=/data/uni0/users/kuno/envs/sharp
+ENV_PY="${ENV}/bin/python"
+
+# gsplat 1.5.3 ships no prebuilt CUDA backend for py3.13, so its extension is JIT-compiled on
+# first render. That needs a real `ninja` (present in the env) and `nvcc` — but the pyenv shims
+# shadow both, so put the env bin and CUDA bin AHEAD of everything. Cache the built extension on
+# uni0 (ayu home is ~full and slow).
+export PATH="${ENV}/bin:/usr/local/cuda/bin:${PATH}"
+export CUDA_HOME=/usr/local/cuda
+export TORCH_EXTENSIONS_DIR=/data/uni0/users/kuno/3dfm_distortion/cache/torch_extensions
 
 export PYTHONPATH="${REPO}/src:${REPO}/training"
 export HF_HOME=/data/uni0/users/kuno/3dfm_distortion/cache/huggingface
-export TORCH_CUDA_ARCH_LIST=9.0          # H100/A100 (Hopper/Ampere); avoids building all archs
+export TORCH_CUDA_ARCH_LIST=8.0          # iruka2 = A100 (sm_80); use 9.0 for H100 (ryugu/isegoi)
 export TORCH_HOME=/data/uni0/users/kuno/3dfm_distortion/cache/torch
 export TMPDIR=/tmp
 
