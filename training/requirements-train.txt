@@ -1,0 +1,9 @@
+# Extra dependencies for the training harness (install into the env on top of the inference deps).
+# lpips, tensorboard, pyyaml, opencv (cv2) are already present in the project env.
+#   pip install -r training/requirements-train.txt
+webdataset            # WebDataset shard IO for the ScanNet++ / raycast datasets
+DISTS-pytorch         # DISTS perceptual loss
+lpips                 # LPIPS perceptual loss (already installed)
+open3d                # mesh ray-casting for the ScanNet-v2 dev/fallback dataset (Step 3c)
+tensorboard           # training logs (already installed)
+pyyaml                # config IO (already installed)

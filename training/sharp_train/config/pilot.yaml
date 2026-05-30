@@ -1,0 +1,37 @@
+# Pilot config: dual-branch SHARP, Stage A, modest render resolution.
+# Internal resolution is fixed at 1536 by the patch encoder; memory is managed via render
+# size, grad checkpointing, bf16, and the frozen patch encoder. Real data is wired in Step 3
+# (set dummy_data: false and point the dataset at the ScanNet++ pairs).
+checkpoint_path: /data/uni0/users/kuno/3dfm_distortion/cache/torch/hub/checkpoints/sharp_2572gikvuh.pt
+stage: A
+ray_map_channels: 0
+single_conditional_decoder: false
+internal_resolution: 1536
+grad_checkpointing: true
+
+render_size: 512
+focal_ratio: 1.0
+dummy_data: false
+
+lr_decoder: 2.0e-4
+lr_trunk: 2.0e-5
+weight_decay: 0.0
+grad_accum: 4
+max_steps: 20000
+bf16: true
+grad_clip: 1.0
+
+loss:
+  alpha_l1: 1.0
+  beta_lpips: 1.0
+  gamma_dists: 1.0
+  w_pp: 1.0
+  w_dd: 1.0
+  w_pd: 0.0
+  w_dp: 0.0
+  lambda_depth: 0.05
+
+out_dir: /data/uni0/users/kuno/3dfm_distortion/results/train_pilot
+log_every: 20
+ckpt_every: 1000
+seed: 0

@@ -1,0 +1,35 @@
+# Full config: Stage B fine-tune scope (image encoder + depth decoder/head + depth alignment;
+# patch encoder frozen), higher render resolution. Start from a Stage-A checkpoint.
+checkpoint_path: /data/uni0/users/kuno/3dfm_distortion/results/train_pilot/ckpt_20000.pt
+stage: B
+ray_map_channels: 0
+single_conditional_decoder: false
+internal_resolution: 1536
+grad_checkpointing: true
+
+render_size: 768
+focal_ratio: 1.0
+dummy_data: false
+
+lr_decoder: 1.0e-4
+lr_trunk: 1.0e-5
+weight_decay: 0.0
+grad_accum: 8
+max_steps: 40000
+bf16: true
+grad_clip: 1.0
+
+loss:
+  alpha_l1: 1.0
+  beta_lpips: 1.0
+  gamma_dists: 1.0
+  w_pp: 1.0
+  w_dd: 1.0
+  w_pd: 0.0
+  w_dp: 0.0
+  lambda_depth: 0.05
+
+out_dir: /data/uni0/users/kuno/3dfm_distortion/results/train_full
+log_every: 20
+ckpt_every: 1000
+seed: 0
