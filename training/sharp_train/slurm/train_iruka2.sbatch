@@ -25,11 +25,21 @@ ENV_PY="${ENV}/bin/python"
 # first render. That needs a real `ninja` (present in the env) and `nvcc` — but the pyenv shims
 # shadow both, so put the env bin and CUDA bin AHEAD of everything. Cache the built extension on
 # uni0 (ayu home is ~full and slow).
-# Pin the explicit CUDA 12.8 toolkit: the bare /usr/local/cuda symlink is node-dependent (e.g.
-# beluga -> 12.2, which rejects the nodes' gcc 13.3 during the JIT build), whereas 12.8 accepts
-# gcc 13 and matches the torch 2.8 cu128 build.
-export PATH="${ENV}/bin:/usr/local/cuda-12.8/bin:${PATH}"
-export CUDA_HOME=/usr/local/cuda-12.8
+# Select a CUDA toolkit at runtime: neither the bare /usr/local/cuda symlink nor a single pinned
+# version is uniform across nodes (the symlink resolves per-node, e.g. beluga->12.2; and 12.8 is
+# absent on some nodes, e.g. beluga tops out at 12.5). Pick the first present toolkit that accepts
+# the nodes' gcc 13.3 -- CUDA >= 12.5 (avoid <= 12.4). This is what the green acceptance used.
+CUDA_DIR=""
+for v in 12.8 12.6 12.5; do
+  if [ -x "/usr/local/cuda-${v}/bin/nvcc" ]; then CUDA_DIR="/usr/local/cuda-${v}"; break; fi
+done
+if [ -z "${CUDA_DIR}" ]; then
+  echo "ERROR: no CUDA>=12.5 toolkit found on $(hostname) for the gsplat JIT build" >&2
+  exit 1
+fi
+echo "using CUDA toolkit: ${CUDA_DIR}"
+export PATH="${ENV}/bin:${CUDA_DIR}/bin:${PATH}"
+export CUDA_HOME="${CUDA_DIR}"
 export TORCH_EXTENSIONS_DIR=/data/uni0/users/kuno/3dfm_distortion/cache/torch_extensions
 
 export PYTHONPATH="${REPO}/src:${REPO}/training"
