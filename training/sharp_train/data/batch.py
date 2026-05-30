@@ -39,6 +39,8 @@ class BatchSample:
     disparity_factor: torch.Tensor
     input_intrinsics: torch.Tensor
     target_viewmat: torch.Tensor
+    # Distorted-branch (D) target intrinsics. The pinhole branch (P) uses
+    # ``target_intrinsics_pinhole`` when set, else falls back to this (they coincide at xi=0).
     target_intrinsics: torch.Tensor
     render_width: int
     render_height: int
@@ -46,6 +48,7 @@ class BatchSample:
     gt_distorted: torch.Tensor
     mask_pinhole: torch.Tensor
     mask_distorted: torch.Tensor
+    target_intrinsics_pinhole: torch.Tensor | None = None
     camera_model: str = "pinhole"
     radial_coeffs: torch.Tensor | None = None
     tangential_coeffs: torch.Tensor | None = None
