@@ -25,8 +25,11 @@ ENV_PY="${ENV}/bin/python"
 # first render. That needs a real `ninja` (present in the env) and `nvcc` — but the pyenv shims
 # shadow both, so put the env bin and CUDA bin AHEAD of everything. Cache the built extension on
 # uni0 (ayu home is ~full and slow).
-export PATH="${ENV}/bin:/usr/local/cuda/bin:${PATH}"
-export CUDA_HOME=/usr/local/cuda
+# Pin the explicit CUDA 12.8 toolkit: the bare /usr/local/cuda symlink is node-dependent (e.g.
+# beluga -> 12.2, which rejects the nodes' gcc 13.3 during the JIT build), whereas 12.8 accepts
+# gcc 13 and matches the torch 2.8 cu128 build.
+export PATH="${ENV}/bin:/usr/local/cuda-12.8/bin:${PATH}"
+export CUDA_HOME=/usr/local/cuda-12.8
 export TORCH_EXTENSIONS_DIR=/data/uni0/users/kuno/3dfm_distortion/cache/torch_extensions
 
 export PYTHONPATH="${REPO}/src:${REPO}/training"

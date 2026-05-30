@@ -102,19 +102,47 @@ def lift_to_world(
         )
 
 
+def _chunked_eigh(
+    matrices: torch.Tensor, chunk: int = 65536
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Batched symmetric eigendecomposition, computed in chunks over the leading dimension.
+
+    The CUDA backend (cuSOLVER ``syevjBatched``) returns ``CUSOLVER_STATUS_INVALID_VALUE`` on
+    very large batches (here ~1.18M 3x3 matrices). Splitting the batch keeps each call within the
+    backend's limits; results are identical to a single call and the op stays differentiable.
+    """
+    leading = matrices.shape[:-2]
+    flat = matrices.reshape(-1, 3, 3)
+    n = flat.shape[0]
+    if n <= chunk:
+        eigvals, eigvecs = torch.linalg.eigh(flat)
+    else:
+        eigval_parts, eigvec_parts = [], []
+        for start in range(0, n, chunk):
+            part_vals, part_vecs = torch.linalg.eigh(flat[start : start + chunk])
+            eigval_parts.append(part_vals)
+            eigvec_parts.append(part_vecs)
+        eigvals = torch.cat(eigval_parts, dim=0)
+        eigvecs = torch.cat(eigvec_parts, dim=0)
+    return eigvals.reshape(*leading, 3), eigvecs.reshape(*leading, 3, 3)
+
+
 def covars_to_quats_scales(
-    covars: torch.Tensor, jitter: float = 1e-9
+    covars: torch.Tensor, jitter: float = 1e-8
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Differentiably decompose symmetric 3x3 covariances into quaternions and scales.
 
     Uses :func:`torch.linalg.eigh` (differentiable, runs on GPU) instead of the inference
-    code's detached CPU SVD. A small ``jitter`` is added to the eigenvalues for gradient
-    stability under near-degeneracy, and the eigenvector basis is flipped to a proper rotation
-    (det = +1) when ``eigh`` returns a reflection.
+    code's detached CPU SVD, and is hardened for the GPU path: a small diagonal ``jitter`` is
+    added *before* the decomposition (the metric covariance has near-zero eigenvalues ~1e-9 that
+    sit below cuSOLVER's tolerance, and the floor also guarantees positive-definiteness), the
+    decomposition is chunked (cuSOLVER rejects the full ~1.18M batch), inputs are sanitized, and
+    the eigenvector basis is flipped to a proper rotation (det = +1) when ``eigh`` returns a
+    reflection.
 
     Args:
         covars: Symmetric covariance matrices, shape [..., 3, 3].
-        jitter: Added to eigenvalues before the square root.
+        jitter: Diagonal floor added to the covariance before the eigendecomposition.
 
     Returns:
         ``(quaternions [..., 4], scales [..., 3])``.
@@ -123,9 +151,15 @@ def covars_to_quats_scales(
     # inside a bf16 training step.
     with torch.autocast(device_type=covars.device.type, enabled=False):
         covars = covars.float()
+        covars = torch.nan_to_num(covars, nan=0.0, posinf=0.0, neginf=0.0)
         # Symmetrize defensively (numerical asymmetry would make eigh complain).
         covars = 0.5 * (covars + covars.transpose(-1, -2))
-        eigvals, eigvecs = torch.linalg.eigh(covars)  # eigvals ascending; eigvecs columns
+        # Diagonal floor BEFORE eigh (cuSOLVER stability + positive-definiteness).
+        if jitter > 0:
+            eye = torch.eye(3, device=covars.device, dtype=covars.dtype)
+            covars = covars + jitter * eye
+
+        eigvals, eigvecs = _chunked_eigh(covars)  # eigvals ascending; eigvecs columns
 
         # Flip to a proper rotation (det = +1) without an in-place op on the autograd graph.
         det = torch.linalg.det(eigvecs)  # [...]
@@ -133,7 +167,7 @@ def covars_to_quats_scales(
         flip[..., :, 2] = torch.sign(det).unsqueeze(-1)
         rotations = eigvecs * flip
 
-        scales = torch.sqrt(eigvals.clamp(min=0.0) + jitter)
+        scales = torch.sqrt(eigvals.clamp(min=0.0))
         quaternions = linalg.quaternions_from_rotation_matrices(rotations)
         return quaternions, scales
 
@@ -143,7 +177,7 @@ def lift_for_render(
     intrinsics: torch.Tensor,
     image_shape: tuple[int, int],
     need_quats_scales: bool,
-    jitter: float = 1e-9,
+    jitter: float = 1e-8,
 ) -> WorldGaussians:
     """Lift to world and, for the UT/distorted path, also produce quats + scales.
 

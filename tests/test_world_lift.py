@@ -18,7 +18,12 @@ from sharp.utils.gaussians import (
     compose_covariance_matrices,
     get_unprojection_matrix,
 )
-from sharp_train.model.world_lift import covars_to_quats_scales, lift_for_render, lift_to_world
+from sharp_train.model.world_lift import (
+    _chunked_eigh,
+    covars_to_quats_scales,
+    lift_for_render,
+    lift_to_world,
+)
 
 _INTRINSICS = torch.tensor(
     [[700.0, 0, 512, 0], [0, 700.0, 512, 0], [0, 0, 1, 0], [0, 0, 0, 1]], dtype=torch.float32
@@ -80,6 +85,33 @@ def test_means_lift_matches_unprojection() -> None:
     unproj = get_unprojection_matrix(torch.eye(4), _INTRINSICS, _IMAGE_SHAPE)
     expected = gaussians.mean_vectors @ unproj[:3, :3].transpose(-1, -2) + unproj[:3, 3]
     assert torch.allclose(world.means, expected, atol=1e-4, rtol=1e-3)
+
+
+def test_chunked_eigh_matches_single() -> None:
+    """_chunked_eigh (small chunk) reproduces a single eigh on a larger-than-chunk batch."""
+    gen = torch.Generator().manual_seed(11)
+    covars = _random_spd(20, gen)
+    vals_single = torch.linalg.eigvalsh(covars)
+    vals_chunked, _ = _chunked_eigh(covars, chunk=8)
+    assert torch.allclose(vals_single, vals_chunked, atol=1e-5)
+
+
+def test_decompose_degenerate_and_tiny() -> None:
+    """Degenerate (repeated) and tiny eigenvalues decompose without NaN and round-trip."""
+    # Fully isotropic (3 equal eigenvalues), one-repeated, and a near-zero eigenvalue.
+    covars = torch.stack(
+        [
+            torch.eye(3),
+            torch.diag(torch.tensor([1.0, 1.0, 5.0])),
+            torch.diag(torch.tensor([1e-9, 1.0, 1.0])),
+        ]
+    )
+    quats, scales = covars_to_quats_scales(covars, jitter=1e-8)
+    assert torch.isfinite(quats).all() and torch.isfinite(scales).all()
+    assert (scales >= 0).all()
+    recomposed = compose_covariance_matrices(quats, scales)
+    # Allow the jitter floor (1e-8) plus fp32 slack.
+    assert torch.allclose(recomposed, covars, atol=1e-3, rtol=1e-3)
 
 
 def test_lift_under_bf16_autocast() -> None:
